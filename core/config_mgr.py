@@ -34,7 +34,6 @@ class ConfigManager:
             "generated_max_size_mb": 1024,
             "generated_prune_size_mb": 200,
             "gpt_image_quality": "low",
-            "entity_repo_urn": "",
         }
         self.load()
 

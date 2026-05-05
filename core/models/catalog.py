@@ -196,6 +196,5 @@ for dur in (5, 15):
             "duration": dur,
             "aspect_ratio": ratio,
             "resolution": "1080p",
-            "hidden": True,
             "description": f"Firefly Kling O3 video model ({dur}s {ratio})",
         }

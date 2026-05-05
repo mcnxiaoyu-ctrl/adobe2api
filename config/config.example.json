@@ -12,6 +12,5 @@
   "retry_backoff_seconds": 1.0,
   "retry_on_status_codes": [429, 451, 500, 502, 503, 504],
   "retry_on_error_types": ["timeout", "connection", "proxy"],
-  "token_rotation_strategy": "round_robin",
-  "entity_repo_urn": ""
+  "token_rotation_strategy": "round_robin"
 }

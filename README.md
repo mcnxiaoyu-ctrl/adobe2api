@@ -75,6 +75,7 @@ docker compose up -d --build
 - `firefly-veo31-*`（视频）
 - `firefly-veo31-ref-*`（视频，参考图模式）
 - `firefly-veo31-fast-*`（视频）
+- `firefly-kling-o3-*`（视频，支持实体引用）
 
 Nano Banana 图像模型（`nano-banana-2`）：
 
@@ -187,6 +188,18 @@ Veo31 Fast 视频模型：
   - `firefly-veo31-fast-4s-16x9-1080p`
   - `firefly-veo31-fast-6s-9x16-720p`
 
+Kling O3 视频模型：
+
+- 命名：`firefly-kling-o3-{duration}-{ratio}`
+- 时长：`5s` / `15s`
+- 比例：`16x9` / `9x16`
+- 分辨率：`1080p`
+- 最多支持 2 张帧参考图
+- 支持通过 `@entity:实体名` 引用已创建的实体
+- 示例：
+  - `firefly-kling-o3-5s-16x9`
+  - `firefly-kling-o3-15s-9x16`
+
 ### 3.1 获取模型列表
 
 ```bash
@@ -264,7 +277,70 @@ curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
   }'
 ```
 
-### 3.3 图像接口：`/v1/images/generations`
+### 3.3 实体创建与可灵引用
+
+实体用于 Kling O3 中保持角色或物体一致。实体绑定到创建它的 Adobe 账号，服务会自动获取该账号的 Creative Cloud 仓库，不需要也不支持手动配置 `repo_urn`。
+
+创建实体：
+
+```bash
+curl -X POST "http://127.0.0.1:6001/v1/entities" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "PinkWarrior",
+    "type": "object",
+    "description": "A pink-haired warrior woman in futuristic armor.",
+    "images": [
+      "data:image/png;base64,<base64_image>"
+    ]
+  }'
+```
+
+字段说明：
+
+- `name`：实体名，后续在 prompt 中使用 `@entity:name` 引用；不要包含 `@`
+- `type`：`character` / `object` / `location`
+- `description`：实体特征描述，最多建议 250 字符以内
+- `images`：1 到 4 张图片，支持 `data:image/...;base64,...` 或纯 base64；单张最大 10MB
+
+查看本地已绑定实体：
+
+```bash
+curl -X GET "http://127.0.0.1:6001/v1/entities" \
+  -H "Authorization: Bearer <service_api_key>"
+```
+
+从当前可用 Adobe 账号同步实体列表：
+
+```bash
+curl -X GET "http://127.0.0.1:6001/v1/entities?sync=true" \
+  -H "Authorization: Bearer <service_api_key>"
+```
+
+在 Kling O3 中引用实体：
+
+```bash
+curl -X POST "http://127.0.0.1:6001/v1/chat/completions" \
+  -H "Authorization: Bearer <service_api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "firefly-kling-o3-5s-16x9",
+    "messages": [{
+      "role": "user",
+      "content": "A cinematic shot of @entity:PinkWarrior walking through a neon city."
+    }]
+  }'
+```
+
+注意事项：
+
+- 实体按 Adobe 账号绑定，不按 token 值绑定；token 自动刷新后仍可继续使用同一账号创建的实体
+- 使用 `@entity:` 时，服务会自动切换到拥有该实体的 Adobe 账号进行生成
+- 一个 prompt 中引用的多个实体必须属于同一个 Adobe 账号
+- 如果多个账号存在同名实体，服务会返回歧义错误，请使用唯一实体名
+
+### 3.4 图像接口：`/v1/images/generations`
 
 ```bash
 curl -X POST "http://127.0.0.1:6001/v1/images/generations" \

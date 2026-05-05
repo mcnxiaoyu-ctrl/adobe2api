@@ -57,6 +57,9 @@ class TokenManager:
             if value.startswith("Bearer "):
                 value = value[7:].strip()
             meta = dict(meta or {})
+            account_id = self.account_id_from_token(value)
+            if account_id and not meta.get("account_id"):
+                meta["account_id"] = account_id
 
             for t in self.tokens:
                 if t["value"] == value:
@@ -93,6 +96,7 @@ class TokenManager:
 
             now_ts = time.time()
             pid = str(profile_id or "").strip()
+            account_id = self.account_id_from_token(value)
             if not pid:
                 raise ValueError("profile_id is required")
 
@@ -116,6 +120,8 @@ class TokenManager:
                 target["refresh_profile_id"] = pid
                 target["refresh_profile_name"] = str(profile_name or "").strip() or pid
                 target["refresh_profile_email"] = str(profile_email or "").strip()
+                if account_id:
+                    target["account_id"] = account_id
                 self.save()
                 return dict(target)
 
@@ -132,6 +138,7 @@ class TokenManager:
                 "refresh_profile_id": pid,
                 "refresh_profile_name": str(profile_name or "").strip() or pid,
                 "refresh_profile_email": str(profile_email or "").strip(),
+                "account_id": account_id,
             }
             self.tokens.append(new_token)
             self.save()
@@ -172,12 +179,14 @@ class TokenManager:
                     continue
                 return {
                     "token_id": t.get("id"),
+                    "token_account_id": t.get("account_id") or self.account_id_from_token(token_value),
                     "token_account_name": t.get("refresh_profile_name") or "",
                     "token_account_email": t.get("refresh_profile_email") or "",
                     "token_source": t.get("source") or "manual",
                 }
         return {
             "token_id": "",
+            "token_account_id": "",
             "token_account_name": "",
             "token_account_email": "",
             "token_source": "manual",
@@ -268,6 +277,60 @@ class TokenManager:
             self.save()
             picked = self._pick_active_token_locked(strategy=strategy)
             return (picked or chosen)["value"]
+
+    @classmethod
+    def account_id_from_token(cls, value: str) -> str:
+        data = cls._decode_jwt_payload(value)
+        if not data:
+            return ""
+        return str(
+            data.get("user_id") or data.get("aa_id") or data.get("sub") or ""
+        ).strip()
+
+    def get_available_for_account(
+        self, account_id: str, strategy: str = "round_robin"
+    ) -> Optional[str]:
+        aid = str(account_id or "").strip()
+        if not aid:
+            return None
+        with self._lock:
+            active = [
+                t
+                for t in self.tokens
+                if t.get("status") == "active"
+                and str(t.get("account_id") or self.account_id_from_token(t.get("value") or ""))
+                == aid
+            ]
+            if not active:
+                return None
+            mode = str(strategy or "round_robin").strip().lower()
+            if mode == "random":
+                return random.choice(active)["value"]
+            idx = self._rr_index % len(active)
+            self._rr_index = (self._rr_index + 1) % max(1, len(self.tokens))
+            return active[idx]["value"]
+
+    def list_active_account_tokens(self) -> List[Dict]:
+        with self._lock:
+            items = []
+            seen = set()
+            for t in self.tokens:
+                if t.get("status") != "active":
+                    continue
+                value = str(t.get("value") or "").strip()
+                aid = str(t.get("account_id") or self.account_id_from_token(value)).strip()
+                if not value or not aid or aid in seen:
+                    continue
+                seen.add(aid)
+                items.append(
+                    {
+                        "token": value,
+                        "account_id": aid,
+                        "account_name": str(t.get("refresh_profile_name") or ""),
+                        "account_email": str(t.get("refresh_profile_email") or ""),
+                    }
+                )
+            return items
 
     def report_exhausted(self, value: str):
         with self._lock:

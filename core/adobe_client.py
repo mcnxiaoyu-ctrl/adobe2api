@@ -91,6 +91,7 @@ class AdobeClient:
     video_submit_url = "https://firefly-3p.ff.adobe.io/v2/3p-videos/generate-async"
     upload_url = "https://firefly-3p.ff.adobe.io/v2/storage/image"
     entity_api_base = "https://firefly-entity.adobe.io/api/entities/"
+    platform_cs_index_url = "https://platform-cs-edge.adobe.io/index"
     platform_cs_base = "https://platform-cs-va6.adobe.io/composite/component/path"
 
     def __init__(self) -> None:
@@ -692,20 +693,27 @@ class AdobeClient:
         entity_name: str,
         image_bytes: bytes,
         mime_type: str = "image/png",
+        component_upload_href: Optional[str] = None,
     ) -> dict:
         if not image_bytes:
             raise AdobeRequestError("entity image is empty")
         repo = str(repo_urn or "").strip()
         name = str(entity_name or "").strip()
         if not repo:
-            raise AdobeRequestError("repo_urn is required for entity image upload")
+            raise AdobeRequestError("Adobe repository is required for entity image upload")
         if not name:
             raise AdobeRequestError("entity name is required for entity image upload")
         component_id = str(uuid.uuid4())
-        url = (
-            f"{self.platform_cs_base}/{quote(repo, safe='')}/"
-            f"appassets/firefly/entities/{quote(name, safe='')}?component_id={component_id}"
-        )
+        upload_href = str(component_upload_href or "").strip()
+        if upload_href:
+            url = upload_href.split("{", 1)[0]
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}component_id={component_id}"
+        else:
+            url = (
+                f"{self.platform_cs_base}/{quote(repo, safe='')}/"
+                f"appassets/firefly/entities/{quote(name, safe='')}?component_id={component_id}"
+            )
         headers = {
             "Authorization": f"Bearer {token}",
             "x-api-key": self.api_key,
@@ -746,6 +754,21 @@ class AdobeClient:
             "length": length,
             "type": mime_type,
         }
+
+    @staticmethod
+    def entity_component_upload_href(entity_data: dict) -> str:
+        upload_links = entity_data.get("uploadLinks") if isinstance(entity_data, dict) else {}
+        if not isinstance(upload_links, dict):
+            return ""
+        links = upload_links.get("http://ns.adobe.com/adobecloud/rel/component")
+        if not isinstance(links, list):
+            return ""
+        for item in links:
+            if isinstance(item, dict):
+                href = str(item.get("href") or "").strip()
+                if href:
+                    return href
+        return ""
 
     def register_entity_base_resources(
         self, token: str, entity_urn: str, components: list[dict]
@@ -799,6 +822,41 @@ class AdobeClient:
                 if isinstance(items, list):
                     return [item for item in items if isinstance(item, dict)]
         return []
+
+    def resolve_repo_urn(self, token: str) -> str:
+        headers = self._submit_headers_minimal(token)
+        headers["accept"] = "*/*"
+        data = self._get_json(self.platform_cs_index_url, headers=headers)
+        if not isinstance(data, dict):
+            raise AdobeRequestError("unable to resolve Adobe repository: invalid index response")
+
+        candidates: list[dict] = []
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                repo_id = str(value.get("repo:repositoryId") or "").strip()
+                if repo_id:
+                    candidates.append(value)
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(data.get("children") or [])
+
+        def score(item: dict) -> tuple[int, int]:
+            return (
+                1 if str(item.get("repo:state") or "").upper() == "ACTIVE" else 0,
+                1 if str(item.get("storage:directoryType") or "") == "assigned" else 0,
+            )
+
+        candidates.sort(key=score, reverse=True)
+        for item in candidates:
+            repo_id = str(item.get("repo:repositoryId") or "").strip()
+            if repo_id:
+                return repo_id
+        raise AdobeRequestError("unable to resolve Adobe repository for current token")
 
     def delete_entity(self, token: str, entity_urn: str) -> bool:
         urn = str(entity_urn or "").strip()

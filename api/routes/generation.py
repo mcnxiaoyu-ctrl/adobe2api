@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.schemas import GenerateRequest
+from core.entity_store import entity_store
 
 
 def build_generation_router(
@@ -68,12 +69,100 @@ def build_generation_router(
             return _entity_urn(entity)
         return ""
 
-    def _resolve_kling_entity_refs(token: str, raw_prompt: str) -> tuple[str, list[dict]]:
+    def _entity_names_from_prompt(raw_prompt: str) -> list[str]:
+        matches = list(entity_ref_re.finditer(raw_prompt or ""))
+        names: list[str] = []
+        for match in matches:
+            name = match.group(1).strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def _sync_entity_by_name(name: str) -> list[dict]:
+        found: list[dict] = []
+        for token_info in token_manager.list_active_account_tokens():
+            token = str(token_info.get("token") or "").strip()
+            account_id = str(token_info.get("account_id") or "").strip()
+            if not token or not account_id:
+                continue
+            try:
+                entities = client.list_entities(token, limit=100)
+            except Exception:
+                continue
+            for item in entities:
+                item_name = _entity_name(item)
+                if item_name != name:
+                    continue
+                urn = _entity_urn(item)
+                if not urn:
+                    continue
+                found.append(
+                    entity_store.upsert(
+                        entity_id=urn,
+                        name=item_name,
+                        entity_type=str(item.get("entityType") or item.get("type") or ""),
+                        account_id=account_id,
+                        account_name=str(token_info.get("account_name") or ""),
+                        account_email=str(token_info.get("account_email") or ""),
+                    )
+                )
+        return found
+
+    def _resolve_entity_bindings(raw_prompt: str) -> tuple[str, list[dict]]:
+        refs: list[dict] = []
+        account_id = ""
+        for name in _entity_names_from_prompt(raw_prompt):
+            matches = entity_store.find_by_name(name)
+            if not matches:
+                matches = _sync_entity_by_name(name)
+            account_ids = {
+                str(item.get("account_id") or "").strip()
+                for item in matches
+                if str(item.get("account_id") or "").strip()
+            }
+            if not matches:
+                raise HTTPException(status_code=400, detail=f"entity not found: {name}")
+            if len(account_ids) > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"entity name is ambiguous across accounts: {name}",
+                )
+            if len(matches) > 1 and len({str(item.get("id") or "") for item in matches}) > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"entity name is ambiguous: {name}",
+                )
+            current_account = next(iter(account_ids), "")
+            if not current_account:
+                raise HTTPException(status_code=400, detail=f"entity has no account: {name}")
+            if account_id and account_id != current_account:
+                raise HTTPException(
+                    status_code=400,
+                    detail="entities in one prompt must belong to the same Adobe account",
+                )
+            account_id = current_account
+            refs.append(
+                {
+                    "name": name,
+                    "urn": str(matches[0].get("id") or "").strip(),
+                    "account_id": account_id,
+                }
+            )
+        return account_id, refs
+
+    def _resolve_kling_entity_refs(
+        token: str,
+        raw_prompt: str,
+        bound_refs: list[dict] | None = None,
+    ) -> tuple[str, list[dict]]:
         matches = list(entity_ref_re.finditer(raw_prompt or ""))
         if not matches:
             return raw_prompt, []
-        entities = client.list_entities(token, limit=100)
-        by_name = {_entity_name(item): item for item in entities if _entity_name(item)}
+        if bound_refs is not None:
+            by_name = {str(item.get("name") or "").strip(): item for item in bound_refs}
+        else:
+            entities = client.list_entities(token, limit=100)
+            by_name = {_entity_name(item): item for item in entities if _entity_name(item)}
         refs: list[dict] = []
         replacements: dict[str, str] = {}
         for match in matches:
@@ -83,7 +172,7 @@ def build_generation_router(
             item = by_name.get(name)
             if not item:
                 raise HTTPException(status_code=400, detail=f"entity not found: {name}")
-            urn = _entity_urn(item)
+            urn = str(item.get("urn") or "").strip() if bound_refs is not None else _entity_urn(item)
             if not urn:
                 raise HTTPException(status_code=400, detail=f"entity has no urn: {name}")
             mention_id = _nanoid()
@@ -534,6 +623,10 @@ def build_generation_router(
         )
 
         try:
+            entity_account_id = ""
+            kling_bound_refs: list[dict] | None = None
+            if video_engine == "kling-o3":
+                entity_account_id, kling_bound_refs = _resolve_entity_bindings(prompt)
             input_images = load_input_images(data.get("messages") or [])
             set_request_task_progress(
                 request, task_status="IN_PROGRESS", task_progress=0.0
@@ -595,7 +688,7 @@ def build_generation_router(
                     entity_refs = None
                     if video_engine == "kling-o3":
                         video_prompt, entity_refs = _resolve_kling_entity_refs(
-                            token, prompt
+                            token, prompt, kling_bound_refs
                         )
 
                     video_bytes, video_meta = client.generate_video(
@@ -714,10 +807,16 @@ def build_generation_router(
                     )
                 return response_payload
 
+            token_selector = None
+            if entity_account_id:
+                token_selector = lambda: token_manager.get_available_for_account(
+                    entity_account_id, strategy=client.token_rotation_strategy
+                )
             return run_with_token_retries(
                 request=request,
                 operation_name="chat.completions",
                 run_once=_run_once,
+                token_selector=token_selector,
             )
         except quota_error_cls:
             error_code = str(

@@ -139,6 +139,14 @@ def _extract_logging_fields(raw_body: bytes) -> dict[str, Optional[str]]:
 
         model = str(data.get("model") or "").strip() or None
         prompt = str(data.get("prompt") or "").strip()
+        entity_name = str(data.get("name") or data.get("displayName") or "").strip()
+        if entity_name:
+            entity_type = str(data.get("type") or data.get("entityType") or "object").strip()
+            description = str(data.get("description") or "").strip()
+            prompt = f"entity: {entity_name}"
+            if description:
+                prompt = f"{prompt} - {description}"
+            model = f"entity:{entity_type or 'object'}"
         if not prompt:
             prompt = _extract_prompt_from_messages(data.get("messages") or [])
         if prompt:
@@ -317,6 +325,7 @@ def _set_request_token_context(request: Request, token: str, attempt: int) -> di
     meta = token_manager.get_meta_by_value(token)
     try:
         request.state.log_token_id = meta.get("token_id")
+        request.state.log_token_account_id = meta.get("token_account_id")
         request.state.log_token_account_name = meta.get("token_account_name")
         request.state.log_token_account_email = meta.get("token_account_email")
         request.state.log_token_source = meta.get("token_source")
@@ -325,6 +334,7 @@ def _set_request_token_context(request: Request, token: str, attempt: int) -> di
             request,
             {
                 "token_id": meta.get("token_id"),
+                "token_account_id": meta.get("token_account_id"),
                 "token_account_name": meta.get("token_account_name"),
                 "token_account_email": meta.get("token_account_email"),
                 "token_source": meta.get("token_source"),
@@ -420,6 +430,7 @@ async def request_logger(request: Request, call_next):
     op_map = {
         "/v1/chat/completions": "chat.completions",
         "/v1/images/generations": "images.generations",
+        "/v1/entities": "entities.create" if method == "POST" else "",
     }
     operation = op_map.get(path, "")
     should_log = bool(operation)
@@ -431,6 +442,7 @@ async def request_logger(request: Request, call_next):
             if path in {
                 "/v1/images/generations",
                 "/v1/chat/completions",
+                "/v1/entities",
                 "/api/v1/generate",
             }:
                 body_meta = _extract_logging_fields(raw_body)
@@ -587,6 +599,7 @@ def _run_with_token_retries(
     operation_name: str,
     run_once: Callable[[str], Any],
     set_request_error_detail: Optional[Callable[..., str]] = None,
+    token_selector: Optional[Callable[[], Optional[str]]] = None,
 ) -> Any:
     max_attempts = client.retry_max_attempts if client.retry_enabled else 1
     max_attempts = max(1, int(max_attempts))
@@ -594,7 +607,11 @@ def _run_with_token_retries(
     report_error = set_request_error_detail or _set_request_error_detail
 
     for attempt in range(1, max_attempts + 1):
-        token = token_manager.get_available(strategy=client.token_rotation_strategy)
+        token = (
+            token_selector()
+            if token_selector is not None
+            else token_manager.get_available(strategy=client.token_rotation_strategy)
+        )
         if not token:
             break
         token_meta = _set_request_token_context(request, token, attempt)
@@ -1245,7 +1262,6 @@ app.include_router(
         client=client,
         token_manager=token_manager,
         require_service_api_key=_require_service_api_key,
-        config_manager=config_manager,
     )
 )
 
