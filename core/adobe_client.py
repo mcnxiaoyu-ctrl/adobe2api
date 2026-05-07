@@ -1229,7 +1229,6 @@ class AdobeClient:
             "debugGenerationEndpoint": "",
             "referenceBlobs": [],
             "referenceFrames": [],
-            "referenceImages": [],
             "referenceVideo": None,
             "cameraMotionReferenceVideo": None,
             "characterReference": None,
